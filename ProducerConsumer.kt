@@ -2,71 +2,66 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 
 /**
- * 这是一个使用 Kotlin 协程和 Channel 实现的经典生产者-消费者问题示例。
+ * 这是一个更复杂的生产者-消费者示例，包含多个生产者和多个消费者。
  *
- * - Channel: 充当了生产者和消费者之间的通信管道。它是一个线程安全的队列，
- *            当生产者向其中 send 数据，或消费者从中 receive 数据时，都可以被挂起。
- *
- * - Producer: 一个协程，负责创建数据并将其放入 Channel。当生产结束时，它会关闭 Channel。
- *
- * - Consumer: 一个或多个协程，负责从 Channel 中取出数据并进行处理。
- *             使用 for 循环来消费 Channel 是一个惯用法，当 Channel 被关闭且为空时，循环会自动结束。
+ * 关键改动：
+ * - 当有多个生产者时，任何一个生产者都不应该单方面关闭 Channel，
+ *   否则其他生产者在尝试发送数据时会出错。
+ * - 关闭 Channel 的责任转移给了管理这些协程的父级作用域（在这里是 main 函数）。
+ *   父作用域会等待所有生产者都完成后，再安全地关闭 Channel。
  */
 
 // 生产者协程
-// 它接收一个 SendChannel，表示它只能向这个 Channel 发送数据。
-suspend fun producer(channel: kotlinx.coroutines.channels.SendChannel<Int>) {
-    println("Producer: Starting to produce numbers...")
-    for (x in 1..5) {
-        println("Producer: Producing $x")
-        // 模拟一些生产所需的时间
-        delay(100) 
-        // 将生产出的数字发送到 channel
-        channel.send(x * x)
+// 新增了 id 参数用于区分，并移除了 channel.close() 调用。
+suspend fun producer(id: Int, channel: kotlinx.coroutines.channels.SendChannel<String>) {
+    println("Producer #$id: Starting to produce...")
+    val items = listOf("Apple", "Banana", "Cherry", "Date")
+    items.forEach { item ->
+        val message = "$item from #$id"
+        println("Producer #$id: Producing -> $message")
+        delay(200L * id) // 让不同的生产者有不同的生产速率
+        channel.send(message)
     }
-    // 生产结束后，关闭 channel，这是一个很重要的步骤。
-    // 它会通知消费者不会再有新的数据传来。
-    channel.close()
-    println("Producer: Done producing. Channel closed.")
+    println("Producer #$id: Finished producing.")
 }
 
-// 消费者协程
-// 它接收一个 ReceiveChannel，表示它只能从这个 Channel 接收数据。
-// id 参数用于区分不同的消费者实例。
-suspend fun consumer(id: Int, channel: kotlinx.coroutines.channels.ReceiveChannel<Int>) {
+// 消费者协程（无需任何改动）
+suspend fun consumer(id: Int, channel: kotlinx.coroutines.channels.ReceiveChannel<String>) {
     println("Consumer #$id: Ready to consume.")
-    // 使用 for 循环来消费 channel 中的数据。
-    // 这个循环会在 channel 中有新数据时执行，
-    // 并在 channel 被关闭且取完所有数据后自动终止。
-    for (y in channel) {
-        println("Consumer #$id: Received --> $y")
-        // 模拟一些消费所需的时间
-        delay(500)
+    for (item in channel) {
+        println("Consumer #$id: Received --> $item")
+        delay(500) // 模拟消费时间
     }
     println("Consumer #$id: Channel is empty and closed. Finishing.")
 }
 
 fun main() = runBlocking {
-    println("Main: Setting up the channel and coroutines...")
+    println("Main: Setting up the channel...")
+    val channel = Channel<String>()
 
-    // 创建一个可以缓冲 2 个整数的 Channel。
-    // 如果不设置缓冲或缓冲为0 (Channel.RENDEZVOUS)，
-    // 生产者每次 send 时都会挂起，直到有消费者 receive。
-    val channel = Channel<Int>(2)
-
-    // 启动一个生产者协程
-    launch {
-        producer(channel)
+    // 启动三个消费者协程
+    repeat(3) { consumerId ->
+        launch {
+            consumer(consumerId + 1, channel)
+        }
     }
 
-    // 启动两个消费者协程，它们会竞争从 Channel 中获取数据
-    launch {
-        consumer(1, channel)
-    }
-    launch {
-        consumer(2, channel)
+    // 启动两个生产者协程
+    val producerJobs = List(2) { producerId ->
+        launch {
+            producer(producerId + 1, channel)
+        }
     }
 
-    println("Main: Coroutines launched. Waiting for them to complete.")
-    // runBlocking 会自动等待其作用域内的所有子协程执行完毕
+    println("Main: All coroutines launched.")
+
+    // 等待所有的生产者 Job 完成
+    producerJobs.joinAll()
+    println("Main: All producers have finished their work.")
+
+    // 现在，当且仅当所有生产者都完成后，我们才安全地关闭 Channel
+    channel.close()
+    println("Main: Channel is now closed.")
+
+    // runBlocking 会等待所有子协程（包括消费者）执行完毕
 }
